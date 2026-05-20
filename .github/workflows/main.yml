@@ -1,0 +1,228 @@
+name: Mini Data Platform CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  POSTGRES_USER: airflow
+  POSTGRES_PASSWORD: airflow
+  POSTGRES_DB: airflow
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: minioadmin
+  DATAPLATFORM_USER: dataplatform
+  DATAPLATFORM_PASSWORD: dataplatform
+  DATAPLATFORM_DB: dataplatform
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint tooling
+        run: pip install flake8
+
+      - name: Lint DAGs
+        run: flake8 dags/ --max-line-length=120 --extend-ignore=E501,W503
+
+      - name: Lint data generator
+        run: flake8 data_generator/ --max-line-length=120 --extend-ignore=E501,W503
+
+      - name: Validate docker-compose syntax
+        run: docker compose config --quiet
+
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Airflow image
+        run: docker compose build airflow-webserver
+
+      - name: Confirm image size
+        run: docker images | grep airflow
+
+  # ────────────────────────────────────────────────────────────────────────────
+  integration-test:
+    name: Integration Tests — full data flow
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── infrastructure ─────────────────────────────────────────────────────
+      - name: Start PostgreSQL & MinIO
+        run: docker compose up -d postgres minio
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U airflow && break
+            echo "Waiting for PostgreSQL … ($i/30)"
+            sleep 3
+          done
+
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            echo "Waiting for MinIO … ($i/30)"
+            sleep 3
+          done
+
+      - name: Set up MinIO buckets
+        run: docker compose run --rm minio-setup
+
+      # ── data ingestion ─────────────────────────────────────────────────────
+      - name: Install data-generator dependencies
+        run: pip install -r data_generator/requirements.txt
+
+      - name: Generate & upload synthetic data
+        env:
+          MINIO_ENDPOINT: localhost:9000
+        run: python data_generator/generate_data.py --rows 200
+
+      - name: Verify file in MinIO (MinIO → bucket)
+        run: |
+          COUNT=$(docker compose run --rm \
+            -e MC_HOST_minio=http://minioadmin:minioadmin@minio:9000 \
+            minio-setup mc ls minio/sales-data --json | wc -l)
+          echo "Objects in sales-data bucket: $COUNT"
+          [ "$COUNT" -ge 1 ]
+
+      # ── Airflow pipeline ───────────────────────────────────────────────────
+      - name: Initialise Airflow
+        run: |
+          docker compose up airflow-init
+          echo "Airflow DB initialised."
+
+      - name: Start Airflow webserver & scheduler
+        run: docker compose up -d airflow-webserver airflow-scheduler
+
+      - name: Wait for Airflow webserver
+        run: |
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8080/health && break
+            echo "Waiting for Airflow … ($i/40)"
+            sleep 5
+          done
+
+      - name: Trigger DAG run
+        run: |
+          curl -sf -X POST "http://localhost:8080/api/v1/dags/sales_data_pipeline/dagRuns" \
+            -H "Content-Type: application/json" \
+            -u "admin:admin" \
+            -d '{"conf": {}}' | python3 -m json.tool
+
+      - name: Wait for DAG completion (up to 3 min)
+        run: |
+          for i in $(seq 1 36); do
+            STATE=$(curl -sf -u admin:admin \
+              "http://localhost:8080/api/v1/dags/sales_data_pipeline/dagRuns?limit=1&order_by=-start_date" \
+              | python3 -c "import sys,json; runs=json.load(sys.stdin)['dag_runs']; print(runs[0]['state'] if runs else 'none')" 2>/dev/null || echo "unknown")
+            echo "DAG state: $STATE ($i/36)"
+            [ "$STATE" = "success" ] && break
+            [ "$STATE" = "failed"  ] && { echo "DAG failed!"; exit 1; }
+            sleep 5
+          done
+
+      # ── data validation ────────────────────────────────────────────────────
+      - name: Validate data reached PostgreSQL (MinIO → Airflow → PostgreSQL)
+        run: |
+          COUNT=$(docker compose exec -T postgres \
+            psql -U dataplatform -d dataplatform -tAc "SELECT COUNT(*) FROM sales;")
+          echo "Rows in sales table: $COUNT"
+          [ "$COUNT" -gt 0 ]
+
+      - name: Validate processed_files bookkeeping
+        run: |
+          COUNT=$(docker compose exec -T postgres \
+            psql -U dataplatform -d dataplatform -tAc "SELECT COUNT(*) FROM processed_files;")
+          echo "Files tracked: $COUNT"
+          [ "$COUNT" -gt 0 ]
+
+      # ── Metabase health ────────────────────────────────────────────────────
+      - name: Start Metabase
+        run: docker compose up -d metabase
+
+      - name: Check Metabase API health (PostgreSQL → Metabase)
+        run: |
+          for i in $(seq 1 20); do
+            STATUS=$(curl -sf http://localhost:3001/api/health \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "starting")
+            echo "Metabase status: $STATUS ($i/20)"
+            [ "$STATUS" = "ok" ] && break
+            sleep 10
+          done
+
+      # ── housekeeping ───────────────────────────────────────────────────────
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "=== postgres ===" && docker compose logs postgres | tail -30
+          echo "=== airflow-scheduler ===" && docker compose logs airflow-scheduler | tail -50
+          echo "=== airflow-webserver ===" && docker compose logs airflow-webserver | tail -30
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy — test environment
+    runs-on: ubuntu-latest
+    needs: integration-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: cp .env.example .env
+
+      - name: Pull latest images
+        run: docker compose pull --ignore-buildable
+
+      - name: Build custom images
+        run: docker compose build
+
+      - name: Deploy all services
+        run: docker compose up -d --remove-orphans
+
+      - name: Verify deployment health
+        run: |
+          sleep 60
+          docker compose ps
+          curl -sf http://localhost:8080/health || exit 1
+          curl -sf http://localhost:9000/minio/health/live || exit 1
+          echo "Deployment healthy."
+
+      - name: Run post-deploy smoke test
+        env:
+          MINIO_ENDPOINT: localhost:9000
+        run: |
+          pip install -r data_generator/requirements.txt
+          python data_generator/generate_data.py --rows 50
+          echo "Smoke test data uploaded."

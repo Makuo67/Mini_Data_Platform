@@ -1,0 +1,28 @@
+# Environment / secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+mini_data/
+venv/
+.venv/
+env/
+
+# Airflow runtime
+logs/
+plugins/
+airflow.db
+
+# Docker / OS
+.DS_Store
+*.log
