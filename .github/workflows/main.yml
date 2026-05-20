@@ -126,24 +126,36 @@ jobs:
         run: |
           for i in $(seq 1 40); do
             curl -sf http://localhost:8080/health && break
-            echo "Waiting for Airflow … ($i/40)"
+            echo "Waiting for Airflow webserver … ($i/40)"
             sleep 5
           done
 
-      - name: Trigger DAG run
+      - name: Wait for Airflow scheduler
         run: |
+          for i in $(seq 1 40); do
+            docker compose exec -T airflow-scheduler curl -sf http://localhost:8974/health && break
+            echo "Waiting for Airflow scheduler … ($i/40)"
+            sleep 5
+          done
+
+      - name: Unpause and trigger DAG run
+        run: |
+          curl -sf -X PATCH "http://localhost:8080/api/v1/dags/sales_data_pipeline" \
+            -H "Content-Type: application/json" \
+            -u "admin:admin" \
+            -d '{"is_paused": false}'
           curl -sf -X POST "http://localhost:8080/api/v1/dags/sales_data_pipeline/dagRuns" \
             -H "Content-Type: application/json" \
             -u "admin:admin" \
             -d '{"conf": {}}' | python3 -m json.tool
 
-      - name: Wait for DAG completion (up to 3 min)
+      - name: Wait for DAG completion (up to 5 min)
         run: |
-          for i in $(seq 1 36); do
+          for i in $(seq 1 60); do
             STATE=$(curl -sf -u admin:admin \
               "http://localhost:8080/api/v1/dags/sales_data_pipeline/dagRuns?limit=1&order_by=-start_date" \
               | python3 -c "import sys,json; runs=json.load(sys.stdin)['dag_runs']; print(runs[0]['state'] if runs else 'none')" 2>/dev/null || echo "unknown")
-            echo "DAG state: $STATE ($i/36)"
+            echo "DAG state: $STATE ($i/60)"
             [ "$STATE" = "success" ] && break
             [ "$STATE" = "failed"  ] && { echo "DAG failed!"; exit 1; }
             sleep 5
