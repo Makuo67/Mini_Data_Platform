@@ -212,9 +212,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create .env
-        run: cp .env.example .env
-
       - name: Pull latest images
         run: docker compose pull --ignore-buildable
 
