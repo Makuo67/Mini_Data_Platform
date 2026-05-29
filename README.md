@@ -80,20 +80,24 @@ processed_files (filename PK, record_count, processed_at)
 
 ## Metabase Setup
 
-1. Open http://localhost:3001 and complete the initial setup wizard.
-2. Add a database connection:
-   - **Type:** PostgreSQL
-   - **Host:** `postgres`
-   - **Port:** `5432`
-   - **Database:** `dataplatform`
-   - **User:** `dataplatform`  **Password:** `dataplatform`
-3. Build questions/dashboards against the `sales` table.
+The provisioning script creates an admin account, connects the `dataplatform` database, and builds the **Sales KPI Dashboard** automatically.
 
-Suggested KPIs:
-- Revenue by region (bar chart)
-- Daily order volume (line chart)
-- Top 5 products by revenue
-- Order status breakdown (pie chart)
+Run it from the **project root** (not from inside `scripts/`):
+
+```bash
+# from Mini_Data_Platform/
+pip install requests
+python3 scripts/setup_metabase.py
+```
+
+Once complete, open the dashboard at http://localhost:3001/dashboard/1
+
+| Credential | Value |
+|------------|-------|
+| Email | `admin@dataplatform.com` |
+| Password | `Admin1234!` |
+
+> **Note:** Always run `setup_metabase.py` from the project root. The script reads credentials from `.env`, which is located in the project root directory.
 
 ## CI/CD — GitHub Actions
 
@@ -160,7 +164,8 @@ Mini_Data_Platform/
 │   └── postgres/
 │       └── init.sql            # creates databases, tables, indexes
 ├── scripts/
-│   └── setup.sh                # one-shot bootstrap script
+│   ├── setup.sh                # one-shot bootstrap script
+│   └── setup_metabase.py       # Metabase provisioning — run from project root
 └── .github/
     └── workflows/
         └── main.yml            # CI/CD pipeline

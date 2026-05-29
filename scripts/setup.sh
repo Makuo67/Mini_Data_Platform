@@ -54,13 +54,29 @@ info "Airflow initialised."
 info "Starting Airflow webserver, scheduler and Metabase…"
 docker compose up -d airflow-webserver airflow-scheduler metabase
 
+info "Waiting for Metabase to be healthy…"
+for i in $(seq 1 40); do
+    curl -sf http://localhost:3001/api/health | grep -q '"status":"ok"' && break
+    printf "  attempt %d/40\r" "$i"; sleep 10
+done
+echo ""
+
+info "Provisioning Metabase dashboard and KPIs…"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -m pip install -q -r scripts/requirements.txt
+    python3 scripts/setup_metabase.py
+else
+    warn "python3 not found — skipping Metabase provisioning."
+    warn "Run manually: pip install requests && python3 scripts/setup_metabase.py"
+fi
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║       Mini Data Platform is running!                 ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  Airflow   → http://localhost:8080  (admin / admin)  ║${NC}"
 echo -e "${GREEN}║  MinIO     → http://localhost:9001  (minioadmin)     ║${NC}"
-echo -e "${GREEN}║  Metabase  → http://localhost:3000                   ║${NC}"
+echo -e "${GREEN}║  Metabase  → http://localhost:3001  (admin)          ║${NC}"
 echo -e "${GREEN}║  PostgreSQL→ localhost:5432         (airflow)        ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""

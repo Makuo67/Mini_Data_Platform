@@ -37,7 +37,7 @@ PG = dict(
 )
 
 DEFAULT_ARGS = {
-    "owner": "data-platform",
+    "owner": "okeke",
     "retries": 2,
     "retry_delay": timedelta(minutes=3),
     "email_on_failure": False,
